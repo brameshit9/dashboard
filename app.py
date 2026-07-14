@@ -1,276 +1,304 @@
-# =========================================================
-# Nifty Bank Premarket (NSE Pre-Open) Tracker — Streamlit App
-# =========================================================
-# Run locally with:  streamlit run streamlit_app.py
-# Deploy for free on Streamlit Community Cloud (see README.md)
-#
-# NSE pre-open session is live 9:00-9:15 AM IST on trading days.
-# Outside that window this will show stale/empty data.
-#
-# NOTE: NSE blocks many datacenter/cloud IPs (including some
-# Streamlit Cloud egress ranges). If you get repeated 401/403s
-# after deploying, see the "If NSE blocks the server" section
-# in README.md for workarounds.
-# =========================================================
-
-import time
+import streamlit as st
+import requests
+import pandas as pd
+import matplotlib.pyplot as plt
 from datetime import datetime
 
-import numpy as np
-import pandas as pd
-import pytz
-import requests
-import streamlit as st
-import plotly.graph_objects as go
+BG = '#F5F7FA'
+CARD = '#FFFFFF'
+BORDER = '#E7EBF0'
+PRIMARY = '#4F46E5'
+UP = '#16A34A'
+DOWN = '#DC2626'
+UP_SOFT = '#DCFCE7'
+DOWN_SOFT = '#FEE2E2'
+TEXT = '#1E293B'
+MUTED = '#64748B'
 
-# ---------------------------------------------------------
-# Config
-# ---------------------------------------------------------
-st.set_page_config(page_title="Nifty Bank Premarket Tracker", layout="wide")
-
-SECURITIES_BANKNIFTY = [
-    'HDFCBANK', 'ICICIBANK', 'SBIN', 'AXISBANK', 'KOTAKBANK',
-    'BANKBARODA', 'UNIONBANK', 'PNB', 'CANBK', 'FEDERALBNK',
-    'AUBANK', 'INDUSINDBK', 'YESBANK', 'IDFCFIRSTB',
+NIFTY50 = [
+    'ADANIENT', 'ADANIPORTS', 'APOLLOHOSP', 'ASIANPAINT', 'AXISBANK',
+    'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BEL', 'BHARTIARTL',
+    'CIPLA', 'COALINDIA', 'DRREDDY', 'EICHERMOT', 'ETERNAL',
+    'GRASIM', 'HCLTECH', 'HDFCBANK', 'HDFCLIFE', 'HEROMOTOCO',
+    'HINDALCO', 'HINDUNILVR', 'ICICIBANK', 'ITC', 'INDUSINDBK',
+    'INFY', 'JSWSTEEL', 'JIOFIN', 'KOTAKBANK', 'LT',
+    'M&M', 'MARUTI', 'MAXHEALTH', 'NESTLEIND', 'NTPC',
+    'ONGC', 'POWERGRID', 'RELIANCE', 'SBILIFE', 'SHRIRAMFIN',
+    'SBIN', 'SUNPHARMA', 'TCS', 'TATACONSUM', 'TATAMOTORS',
+    'TATASTEEL', 'TECHM', 'TITAN', 'TRENT', 'ULTRACEMCO',
+    'WIPRO', 'INDIGO'
 ]
 
-PREOPEN_COLUMNS = [
-    "Symbol", "PrevClose", "IEP", "Change", "PctChange", "YearHigh", "YearLow",
-    "FinalQuantity", "TotalTradedVolume", "TotalTurnover", "MarketCap",
-    "TotalBuyQuantity", "TotalSellQuantity",
-]
 
-# ---------------------------------------------------------
-# Data fetching (cached briefly so repeated reruns don't hammer NSE)
-# ---------------------------------------------------------
-def get_nse_session():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/124.0 Safari/537.36",
+@st.cache_resource
+def get_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept": "application/json, text/plain, */*",
-        "Referer": "https://www.nseindia.com/market-data/pre-open-market-cotation",
+        "Referer": "https://www.nseindia.com/market-data/pre-open-market-cotd",
     })
-    session.get("https://www.nseindia.com", timeout=10)
-    time.sleep(1)
-    return session
+    s.get("https://www.nseindia.com", timeout=5)
+    return s
 
 
-def fetch_preopen_data(key="BANKNIFTY", retries=3):
-    session = get_nse_session()
-    url = f"https://www.nseindia.com/api/market-data-pre-open?key={key}"
-    last_json = None
-    errors = []
-    for attempt in range(retries):
-        resp = session.get(url, timeout=10)
-        if resp.status_code == 200:
-            try:
-                last_json = resp.json()
-            except ValueError:
-                errors.append(f"Attempt {attempt+1}: got 200 but non-JSON (bot-check page).")
-                time.sleep(2)
-                session = get_nse_session()
-                continue
-            if last_json.get("data"):
-                return last_json, errors
-            errors.append(f"Attempt {attempt+1}: response had no 'data' rows.")
-        else:
-            errors.append(f"Attempt {attempt+1}: HTTP {resp.status_code}")
-        time.sleep(2)
-        session = get_nse_session()
-    return last_json, errors
+def fetch_preopen(session):
+    url = "https://www.nseindia.com/api/market-data-pre-open?key=ALL"
+    try:
+        r = session.get(url, timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException:
+        session.cookies.clear()
+        session.get("https://www.nseindia.com", timeout=5)
+        r = session.get(url, timeout=5)
+        r.raise_for_status()
+        return r.json()
 
 
-@st.cache_data(ttl=25, show_spinner=False)
-def fetch_preopen_data_cached(key="BANKNIFTY"):
-    return fetch_preopen_data(key)
+def to_dataframe(raw, symbols):
+    rows = [
+        {
+            "symbol": item["metadata"]["symbol"],
+            "price": item["metadata"]["lastPrice"],
+            "change": item["metadata"]["pChange"],
+        }
+        for item in raw["data"]
+        if item["metadata"]["symbol"] in symbols
+    ]
+    df = pd.DataFrame(rows)
+    return df.sort_values("change", ascending=True).reset_index(drop=True)
 
 
-def parse_preopen(data):
-    rows = []
-    if not data:
-        return pd.DataFrame(columns=PREOPEN_COLUMNS)
-    for item in data.get("data", []):
-        meta = item.get("metadata", {})
-        pre = item.get("detail", {}).get("preOpenMarket", {})
-        rows.append({
-            "Symbol": meta.get("symbol"),
-            "PrevClose": meta.get("previousClose"),
-            "IEP": pre.get("IEP", meta.get("iep")),
-            "Change": meta.get("change"),
-            "PctChange": meta.get("pChange"),
-            "YearHigh": meta.get("yearHigh"),
-            "YearLow": meta.get("yearLow"),
-            "FinalQuantity": pre.get("finalQuantity"),
-            "TotalTradedVolume": pre.get("totalTradedVolume"),
-            "TotalTurnover": meta.get("totalTurnover"),
-            "MarketCap": meta.get("marketCap"),
-            "TotalBuyQuantity": pre.get("totalBuyQuantity"),
-            "TotalSellQuantity": pre.get("totalSellQuantity"),
-        })
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=PREOPEN_COLUMNS)
+st.set_page_config(page_title="Nifty50 Pre-Market Dashboard", layout="wide", page_icon="📊")
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+html, body, [class*="css"] {{
+    font-family: 'Inter', sans-serif;
+}}
+
+.stApp {{
+    background-color: {BG};
+}}
+
+#MainMenu, footer, header {{visibility: hidden;}}
+
+.block-container {{
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+    max-width: 1400px;
+}}
+
+.dash-title {{
+    font-size: 28px;
+    font-weight: 800;
+    color: {TEXT};
+    margin-bottom: 2px;
+}}
+.dash-sub {{
+    font-size: 14px;
+    color: {MUTED};
+    font-weight: 500;
+}}
+.live-dot {{
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: {UP};
+    margin-right: 6px;
+}}
+
+.kpi-card {{
+    background-color: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    padding: 18px 20px;
+    height: 100%;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.04), 0 1px 2px rgba(16, 24, 40, 0.06);
+}}
+.kpi-label {{
+    font-size: 12px;
+    color: {MUTED};
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}}
+.kpi-value {{
+    font-size: 24px;
+    font-weight: 700;
+    color: {TEXT};
+}}
+.kpi-value.up {{ color: {UP}; }}
+.kpi-value.down {{ color: {DOWN}; }}
+.kpi-badge {{
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 6px;
+    margin-top: 8px;
+}}
+.kpi-badge.up {{ background-color: {UP_SOFT}; color: {UP}; }}
+.kpi-badge.down {{ background-color: {DOWN_SOFT}; color: {DOWN}; }}
+
+.chart-panel {{
+    background-color: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 16px;
+    padding: 24px;
+    margin-top: 20px;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.04), 0 1px 2px rgba(16, 24, 40, 0.06);
+}}
+.panel-heading {{
+    font-size: 15px;
+    font-weight: 700;
+    color: {TEXT};
+    margin-bottom: 16px;
+}}
+
+div.stButton > button {{
+    background-color: {PRIMARY};
+    color: #FFFFFF;
+    border: none;
+    border-radius: 10px;
+    font-weight: 600;
+    padding: 8px 22px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}}
+div.stButton > button:hover {{
+    background-color: #4338CA;
+    color: #FFFFFF;
+}}
+
+.footer-note {{
+    font-size: 12px;
+    color: {MUTED};
+    margin-top: 18px;
+}}
+</style>
+""", unsafe_allow_html=True)
 
 
-def filter_to_banknifty_universe(df, universe=SECURITIES_BANKNIFTY):
-    if df.empty or "Symbol" not in df.columns:
-        return pd.DataFrame(columns=PREOPEN_COLUMNS), sorted(set(universe))
-    universe_set = set(universe)
-    filtered = df[df["Symbol"].isin(universe_set)].copy()
-    found = set(filtered["Symbol"])
-    missing = sorted(universe_set - found)
-    return filtered, missing
+@st.cache_data(ttl=60)
+def load_data():
+    session = get_session()
+    raw = fetch_preopen(session)
+    return to_dataframe(raw, NIFTY50)
 
 
-def add_trade_signals(df):
-    df = df.copy()
-    buy = df["TotalBuyQuantity"].fillna(0)
-    sell = df["TotalSellQuantity"].fillna(0)
-    total_qty = buy + sell
-
-    df["OrderImbalance"] = np.where(total_qty > 0, (buy - sell) / total_qty, np.nan)
-    df["BuySellRatio"] = np.where(sell > 0, buy / sell, np.nan)
-    df["DistFrom52WHighPct"] = np.where(
-        df["YearHigh"] > 0, (df["IEP"] - df["YearHigh"]) / df["YearHigh"] * 100, np.nan
-    )
-    df["DistFrom52WLowPct"] = np.where(
-        df["YearLow"] > 0, (df["IEP"] - df["YearLow"]) / df["YearLow"] * 100, np.nan
-    )
-    df["NearCircuitFlag"] = df["PctChange"].abs() >= 9
-    df["WatchScore"] = df["PctChange"].abs() * (1 + df["OrderImbalance"].abs().fillna(0))
-    return df
-
-
-def is_preopen_session_live():
-    ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.now(ist)
-    if now.weekday() >= 5:
-        return False, "Weekend — market closed, data is stale.", now
-    start = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    end = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    if start <= now <= end:
-        return True, "Live pre-open window.", now
-    return False, "Outside 9:00-9:15 AM IST window — this is a STALE/previous-session snapshot.", now
-
-
-# ---------------------------------------------------------
-# UI
-# ---------------------------------------------------------
-st.title("🏦 Nifty Bank Premarket Tracker")
-st.caption("NSE pre-open data for the 14 Nifty Bank constituents. Live only 9:00-9:15 AM IST on trading days.")
-
-col_a, col_b, col_c = st.columns([1, 1, 2])
-with col_a:
-    auto_refresh = st.checkbox("Auto-refresh every 30s", value=False)
-with col_b:
-    if st.button("🔄 Refresh now"):
+header_col1, header_col2 = st.columns([5, 1])
+with header_col1:
+    st.markdown('<div class="dash-title">Nifty50 Pre-Market Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dash-sub">NSE India &nbsp;·&nbsp; Pre-Open Session Overview</div>', unsafe_allow_html=True)
+with header_col2:
+    st.write("")
+    if st.button("↻ Refresh", use_container_width=True):
         st.cache_data.clear()
-with col_c:
-    live, note, now = is_preopen_session_live()
-    ist_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
-    if live:
-        st.success(f"🟢 {ist_str} — {note}")
-    else:
-        st.warning(f"🟡 {ist_str} — {note}")
 
-raw, errors = fetch_preopen_data_cached(key="BANKNIFTY")
-
-with st.expander("Fetch diagnostics", expanded=False):
-    if errors:
-        for e in errors:
-            st.write("⚠️", e)
-    else:
-        st.write("No errors on last fetch.")
-
-df = parse_preopen(raw)
-df, missing = filter_to_banknifty_universe(df)
-
-if missing:
-    st.info(f"No premarket data returned for: {', '.join(missing)}")
-
-df = df.dropna(subset=["PctChange"])
-
-if df.empty:
-    st.error(
-        "No usable pre-open data available right now. This usually means you're outside "
-        "the 9:00-9:15 AM IST window, or NSE is blocking this server's IP. "
-        "See the diagnostics above, and the README for workarounds if this persists after deploying."
-    )
+try:
+    df = load_data()
+except Exception as e:
+    st.markdown(f"""
+    <div class="chart-panel">
+        <div class="panel-heading" style="color:{DOWN};">Unable to fetch data</div>
+        <div style="color:{TEXT};">{e}</div>
+    </div>
+    """, unsafe_allow_html=True)
     st.stop()
 
-df = add_trade_signals(df)
-df = df.sort_values("PctChange", ascending=False)
+top_loser = df.iloc[0]
+top_gainer = df.iloc[-1]
+timestamp = datetime.now().strftime("%d %b %Y, %H:%M:%S")
+up_count = int((df["change"] >= 0).sum())
+down_count = int((df["change"] < 0).sum())
+ratio = up_count / down_count if down_count > 0 else float('inf')
 
-# --- Summary metrics ---
-up = int((df["PctChange"] > 0).sum())
-down = int((df["PctChange"] < 0).sum())
-flat = int((df["PctChange"] == 0).sum())
-total = len(df)
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total stocks", total)
-m2.metric("Up", up, f"{up/total*100:.0f}%" if total else None)
-m3.metric("Down", down, f"-{down/total*100:.0f}%" if total else None)
-m4.metric("Flat", flat)
-
-# --- Bar chart ---
-plot_df = df.sort_values("PctChange", ascending=True)
-colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in plot_df["PctChange"]]
-text_labels = [
-    f"{row.PctChange:+.2f}%  (₹{row.Change:+.2f})" if pd.notna(row.Change) else f"{row.PctChange:+.2f}%"
-    for row in plot_df.itertuples()
-]
-
-fig = go.Figure(go.Bar(
-    x=plot_df["PctChange"],
-    y=plot_df["Symbol"],
-    orientation="h",
-    marker_color=colors,
-    text=text_labels,
-    textposition="outside",
-))
-fig.update_layout(
-    title="Premarket % Change — All Bank Nifty Stocks",
-    xaxis_title="% Change (Premarket vs Prev Close)",
-    height=max(400, 40 * len(plot_df)),
-    margin=dict(l=10, r=80, t=50, b=10),
+st.markdown(
+    f'<div class="dash-sub"><span class="live-dot"></span>Last updated {timestamp} IST</div>',
+    unsafe_allow_html=True
 )
-fig.add_vline(x=0, line_color="black", line_width=1)
-st.plotly_chart(fig, use_container_width=True)
+st.write("")
 
-# --- Watchlist ---
-st.subheader("🔍 Must-check watchlist (move size + order-imbalance conviction)")
-cols = ["Symbol", "IEP", "PctChange", "OrderImbalance", "BuySellRatio",
-        "DistFrom52WHighPct", "DistFrom52WLowPct", "NearCircuitFlag", "WatchScore"]
-cols = [c for c in cols if c in df.columns]
-watch = df.dropna(subset=["WatchScore"]).sort_values("WatchScore", ascending=False)
-st.dataframe(watch[cols].round(2), use_container_width=True, hide_index=True)
+k1, k2, k3, k4, k5 = st.columns(5)
+with k1:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-label">Advancers</div>
+        <div class="kpi-value up">{up_count}</div>
+        <div class="kpi-badge up">of 50 stocks</div></div>""", unsafe_allow_html=True)
+with k2:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-label">Decliners</div>
+        <div class="kpi-value down">{down_count}</div>
+        <div class="kpi-badge down">of 50 stocks</div></div>""", unsafe_allow_html=True)
+with k3:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-label">A/D Ratio</div>
+        <div class="kpi-value">{ratio:.2f}</div>
+        <div class="kpi-badge up" style="background-color:#EEF2FF; color:{PRIMARY};">advance / decline</div></div>""",
+        unsafe_allow_html=True)
+with k4:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-label">Top Gainer</div>
+        <div class="kpi-value up">{top_gainer['symbol']}</div>
+        <div class="kpi-badge up">+{top_gainer['change']:.2f}%</div></div>""", unsafe_allow_html=True)
+with k5:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-label">Top Loser</div>
+        <div class="kpi-value down">{top_loser['symbol']}</div>
+        <div class="kpi-badge down">{top_loser['change']:.2f}%</div></div>""", unsafe_allow_html=True)
 
-circuit_hits = df[df["NearCircuitFlag"] == True]
-if len(circuit_hits) > 0:
-    st.warning(f"⚠️ {len(circuit_hits)} stock(s) showing premarket move ≥9% — verify circuit limit before trading.")
-    st.dataframe(circuit_hits[["Symbol", "PctChange"]].round(2), hide_index=True)
+col1, col2 = st.columns([3, 1])
 
-# --- Full detail table ---
-with st.expander("📋 Full premarket data — all fields", expanded=False):
-    st.dataframe(df.round(2), use_container_width=True, hide_index=True)
+with col1:
+    st.markdown('<div class="chart-panel">', unsafe_allow_html=True)
+    st.markdown('<div class="panel-heading">Premarket Movement — % Change</div>', unsafe_allow_html=True)
+    fig1, ax1 = plt.subplots(figsize=(10, 11))
+    fig1.patch.set_facecolor(CARD)
+    colors = [UP if c >= 0 else DOWN for c in df["change"]]
+    ax1.set_facecolor(CARD)
+    ax1.barh(df["symbol"], df["change"], color=colors, height=0.6)
+    ax1.axvline(0, color=BORDER, linewidth=1)
+    ax1.tick_params(colors=MUTED, labelsize=9)
+    for label in ax1.get_yticklabels():
+        label.set_color(TEXT)
+    for spine in ax1.spines.values():
+        spine.set_visible(False)
+    ax1.grid(axis='x', color=BORDER, linewidth=0.8)
+    ax1.set_axisbelow(True)
+    for i, change in enumerate(df["change"]):
+        ax1.text(change, i, f' {change:+.2f}%', va='center',
+                  color=TEXT, fontsize=8,
+                  ha='left' if change >= 0 else 'right')
+    st.pyplot(fig1, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# --- Gainers / Losers ---
-g_col, l_col = st.columns(2)
-gainers = df[df["PctChange"] > 0].sort_values("PctChange", ascending=False)
-losers = df[df["PctChange"] < 0].sort_values("PctChange", ascending=True)
-with g_col:
-    st.subheader(f"📈 Up ({len(gainers)})")
-    st.dataframe(gainers[["Symbol", "PrevClose", "IEP", "PctChange"]].round(2), hide_index=True)
-with l_col:
-    st.subheader(f"📉 Down ({len(losers)})")
-    st.dataframe(losers[["Symbol", "PrevClose", "IEP", "PctChange"]].round(2), hide_index=True)
+with col2:
+    st.markdown('<div class="chart-panel">', unsafe_allow_html=True)
+    st.markdown('<div class="panel-heading">Market Breadth</div>', unsafe_allow_html=True)
+    fig2, ax2 = plt.subplots(figsize=(5, 5))
+    fig2.patch.set_facecolor(CARD)
+    ax2.set_facecolor(CARD)
+    wedges, texts, autotexts = ax2.pie(
+        [up_count, down_count],
+        labels=[f"Up\n{up_count}", f"Down\n{down_count}"],
+        colors=[UP, DOWN], wedgeprops={"width": 0.42, "edgecolor": CARD, "linewidth": 3},
+        autopct="%1.0f%%", startangle=90,
+        textprops={"color": TEXT, "fontsize": 10, "fontweight": "bold"}
+    )
+    for at in autotexts:
+        at.set_color('#FFFFFF')
+        at.set_fontweight('bold')
+    st.pyplot(fig2, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-st.caption("Data source: NSE India pre-open API. Informational only — not investment advice. "
-           "Always confirm live price/quantity before placing any order.")
-
-# --- Auto-refresh loop ---
-if auto_refresh:
-    time.sleep(30)
-    st.rerun()
+st.markdown(
+    '<div class="footer-note">Data source: NSE India &nbsp;·&nbsp; Auto-refreshes every 60 seconds &nbsp;·&nbsp; '
+    'Click Refresh for an immediate update</div>',
+    unsafe_allow_html=True
+)
